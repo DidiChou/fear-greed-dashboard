@@ -6,7 +6,7 @@ import {
   LineChart, Line, CartesianGrid, ReferenceLine, ComposedChart, Area, Customized,
 } from "recharts";
 import { PerplexityAttribution } from "@/components/PerplexityAttribution";
-import { RefreshCw, Sun, Moon, TrendingUp, TrendingDown, Minus, Flame, Droplets } from "lucide-react";
+import { RefreshCw, Sun, Moon, TrendingUp, TrendingDown, Flame, Droplets, BarChart2 } from "lucide-react";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 interface StockFGData {
@@ -29,7 +29,17 @@ interface OilAsset {
 }
 interface OilFGData {
   wti: OilAsset; brent: OilAsset;
-  spread: number; ovx: number; updatedAt: number;
+  spread?: number; ovx?: number; updatedAt: number;
+}
+
+interface NasdaqFGData {
+  score: number; rating: string;
+  price: number; change: number; changePct: number;
+  high52w: number; low52w: number;
+  ndxPrice: number; ndxHigh52w: number; ndxLow52w: number;
+  vxn: number;
+  components: OilComponent[];
+  historical: { date: string; price: number; score: number }[];
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -124,6 +134,11 @@ const KPI_TOOLTIPS: Record<string, string> = {
   "30D Rate of Change": "Price change over the last 30 trading days as a percentage. Strong positive ROC = bullish momentum; sharp negative ROC = bearish momentum.",
   "Short-term Trend": "Compares the 5-day SMA to the 20-day SMA. When SMA5 > SMA20, short-term trend is bullish. When SMA5 < SMA20, trend has turned bearish.",
   "RSI": "Relative Strength Index (14-day). Above 70 = overbought / Extreme Greed. Below 30 = oversold / Extreme Fear. 50 is the neutral midpoint.",
+  "RSI (14)": "Relative Strength Index (14-day). Above 70 = overbought / Extreme Greed. Below 30 = oversold / Extreme Fear. 50 is the neutral midpoint.",
+  "VXN Volatility": "CBOE NASDAQ Volatility Index — the VIX equivalent for NASDAQ. High VXN (>30) signals fear and uncertainty in tech stocks; low VXN = complacency. Inverted: high VXN scores low on the F&G scale.",
+  "NDX Price": "Current NASDAQ 100 Index level. Tracks the 100 largest non-financial companies listed on NASDAQ — dominated by mega-cap tech (Apple, Microsoft, Nvidia, etc.).",
+  "QQQ Price": "Invesco QQQ ETF — tracks the NASDAQ 100 Index. Widely used as the primary benchmark for NASDAQ sentiment and momentum analysis.",
+  "VXN (NASDAQ Vol)": "CBOE NASDAQ Volatility Index. Measures expected 30-day volatility of the NDX. Above 30 signals elevated fear; below 15 signals complacency in tech stocks.",
   "Brent–WTI Spread": "Price difference between Brent Crude and WTI. Brent typically trades at a premium to WTI due to lower sulfur content and global benchmark status. Widening spread signals Brent-specific demand.",
   "OVX (Oil VIX)": "CBOE Crude Oil Volatility Index. Derived from USO options. Elevated OVX (>50) signals fear and expectation of large price swings in crude oil markets.",
   "Updated": "Timestamp of the last successful data refresh. The backend caches oil data for 5 minutes to avoid overloading Yahoo Finance — auto-refreshes every 5 minutes.",
@@ -473,8 +488,8 @@ function OilTab({ data, asset, label, icon: Icon, accentColor }:
             <KpiCard key={c.label} label={c.label} value={c.value} sub={getZoneLabel(c.score)} color={getZoneColor(c.score)} />
           ))}
           {/* Spread / OVX context */}
-          <KpiCard label="Brent–WTI Spread" value={`$${data.spread.toFixed(2)}`} sub="Quality premium" color="#94a3b8" />
-          <KpiCard label="OVX (Oil VIX)" value={data.ovx?.toFixed(1) ?? "—"} sub={data.ovx > 50 ? "High fear" : "Moderate"} color={data.ovx > 50 ? "#ef4444" : "#eab308"} />
+          <KpiCard label="Brent–WTI Spread" value={data.spread != null ? `$${data.spread.toFixed(2)}` : "—"} sub="Quality premium" color="#94a3b8" />
+          <KpiCard label="OVX (Oil VIX)" value={data.ovx != null ? data.ovx.toFixed(1) : "—"} sub={(data.ovx ?? 0) > 50 ? "High fear" : "Moderate"} color={(data.ovx ?? 0) > 50 ? "#ef4444" : "#eab308"} />
           <KpiCard label="Updated" value={new Date(data.updatedAt).toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit" })} sub="Auto-refresh 5m" color="#64748b" />
         </div>
 
@@ -591,8 +606,145 @@ function TabSkeleton() {
   );
 }
 
+// ─── NASDAQ F&G TAB ────────────────────────────────────────────────────────────
+function NasdaqTab({ data }: { data: NasdaqFGData | undefined }) {
+  if (!data) return <TabSkeleton />;
+  const accentColor = "#a855f7"; // purple for NASDAQ/tech
+  const scoreColor = getZoneColor(data.score);
+
+  const barData = data.components.map(c => ({ name: c.label.split(" ")[0], score: c.score, fill: getZoneColor(c.score) }));
+  const radarData = data.components.map(c => ({ axis: c.label.split(" ")[0], score: c.score }));
+
+  return (
+    <div className="space-y-4">
+      {/* Top Row */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        {/* Gauge */}
+        <Card className="lg:col-span-4 p-4 flex flex-col items-center">
+          <div className="flex items-center gap-2 mb-2">
+            <BarChart2 size={14} style={{ color: accentColor }} />
+            <SectionLabel>NASDAQ 100 / QQQ</SectionLabel>
+          </div>
+          <Speedometer score={data.score} />
+          <div className="text-center -mt-1">
+            <div className="text-5xl font-black tabular-nums" style={{ color: scoreColor }}>
+              <AnimatedNumber value={data.score} decimals={1} />
+            </div>
+            <span className="inline-block mt-1 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-widest text-white" style={{ backgroundColor: scoreColor }}>
+              {data.rating}
+            </span>
+            {/* Price rows */}
+            <div className="mt-3 p-3 bg-secondary/50 rounded-lg">
+              <div className="text-xs text-muted-foreground mb-1">QQQ ETF</div>
+              <div className="text-3xl font-black tabular-nums" style={{ color: accentColor }}>
+                ${data.price.toFixed(2)}
+              </div>
+              <div className="flex items-center justify-center gap-1 text-sm font-semibold mt-0.5"
+                style={{ color: data.change >= 0 ? "#22c55e" : "#ef4444" }}>
+                {data.change >= 0 ? <TrendingUp size={14}/> : <TrendingDown size={14}/>}
+                {data.change >= 0 ? "+" : ""}{data.change.toFixed(2)} ({data.changePct >= 0 ? "+" : ""}{data.changePct.toFixed(2)}%)
+              </div>
+              <div className="mt-2 pt-2 border-t border-border/50">
+                <div className="text-xs text-muted-foreground mb-0.5">NDX Index</div>
+                <div className="text-xl font-black tabular-nums" style={{ color: accentColor }}>
+                  {data.ndxPrice.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-2 text-xs text-muted-foreground">
+                <div>52W Low: <span className="font-bold text-foreground">${data.low52w}</span></div>
+                <div>52W High: <span className="font-bold text-foreground">${data.high52w}</span></div>
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        {/* KPI Cards */}
+        <div className="lg:col-span-5 grid grid-cols-2 sm:grid-cols-3 gap-3 content-start">
+          {data.components.map(c => (
+            <KpiCard key={c.label} label={c.label} value={c.value} sub={getZoneLabel(c.score)} color={getZoneColor(c.score)} />
+          ))}
+          <KpiCard label="VXN (NASDAQ Vol)" value={data.vxn.toFixed(1)} sub={(data.vxn ?? 0) > 30 ? "High fear" : "Moderate"} color={(data.vxn ?? 0) > 30 ? "#ef4444" : "#eab308"} />
+          <KpiCard label="NDX Price" value={data.ndxPrice.toLocaleString("en-US", { maximumFractionDigits: 0 })} sub="NASDAQ 100" color={accentColor} />
+          <KpiCard label="Updated" value={new Date().toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit" })} sub="Auto-refresh 5m" color="#64748b" />
+        </div>
+
+        {/* Radar */}
+        <Card className="lg:col-span-3 p-4">
+          <SectionLabel>Component Radar</SectionLabel>
+          <ResponsiveContainer width="100%" height={200}>
+            <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="72%">
+              <PolarGrid stroke="hsl(var(--border))" gridType="polygon"/>
+              <PolarAngleAxis dataKey="axis" tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10, fontWeight:600 }}/>
+              <Radar dataKey="score" stroke={accentColor} fill={accentColor} fillOpacity={0.25} strokeWidth={2}/>
+            </RadarChart>
+          </ResponsiveContainer>
+        </Card>
+      </div>
+
+      {/* Historical dual chart */}
+      {data.historical.length > 0 && (
+        <Card className="p-4">
+          <SectionLabel>QQQ Price & Sentiment — 90 Days</SectionLabel>
+          <OilColoredHistoricalChart data={data.historical} accentColor={accentColor} />
+          <div className="flex gap-4 mt-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-1"><div className="w-4 h-1 rounded" style={{ background: "linear-gradient(to right, #ef4444, #f97316, #eab308, #84cc16, #22c55e)" }}/> F&G Score (left axis)</div>
+            <div className="flex items-center gap-1"><div className="w-3 h-0.5 rounded" style={{ backgroundColor: accentColor }}/> QQQ Price (right axis)</div>
+          </div>
+        </Card>
+      )}
+
+      {/* Component bar chart */}
+      <Card className="p-4">
+        <SectionLabel>Component Score Distribution</SectionLabel>
+        <ResponsiveContainer width="100%" height={150}>
+          <BarChart data={barData} margin={{ top:4, right:8, left:-20, bottom:0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false}/>
+            <XAxis dataKey="name" tick={{ fill:"hsl(var(--muted-foreground))", fontSize:11, fontWeight:600 }} tickLine={false}/>
+            <YAxis domain={[0,100]} tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false}/>
+            <Tooltip contentStyle={{ backgroundColor:"hsl(var(--card))", border:"1px solid hsl(var(--border))", borderRadius:"8px", fontSize:"12px" }}
+              formatter={(v:number)=>[`${v} — ${getZoneLabel(v)}`,"Score"]}/>
+            <Bar dataKey="score" radius={[3,3,0,0]}>
+              {barData.map((e,i)=><Cell key={i} fill={e.fill} fillOpacity={0.85}/>)}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </Card>
+
+      {/* Component breakdown */}
+      <Card className="p-4">
+        <div className="flex justify-between items-center mb-4">
+          <SectionLabel>Component Breakdown</SectionLabel>
+          <span className="text-[10px] text-muted-foreground">Method: Price Momentum · VXN · RSI · ROC · Strength · Trend</span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {data.components.map(c => {
+            const col = getZoneColor(c.score);
+            return (
+              <div key={c.label} className="flex items-start gap-3">
+                <div className="w-10 text-lg font-black tabular-nums text-right pt-0.5" style={{ color: col }}>{c.score}</div>
+                <div className="flex-1">
+                  <div className="flex justify-between mb-0.5">
+                    <span className="text-xs font-bold tracking-wider">{c.label.toUpperCase()}</span>
+                    <span className="text-[10px] text-muted-foreground font-mono">{c.value}</span>
+                  </div>
+                  <div className="h-1.5 bg-secondary rounded-full overflow-hidden mb-1">
+                    <div className="h-full rounded-full transition-all duration-700" style={{ width:`${c.score}%`, backgroundColor:col }}/>
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">{c.description}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      <ZoneLegend />
+    </div>
+  );
+}
+
 // ─── MAIN DASHBOARD ────────────────────────────────────────────────────────────
-type TabId = "stocks" | "wti" | "brent";
+type TabId = "stocks" | "nasdaq" | "wti" | "brent";
 
 export default function Dashboard() {
   const [darkMode, setDarkMode] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
@@ -607,14 +759,18 @@ export default function Dashboard() {
   const { data: oilData, refetch: refetchOil, isFetching: fetchingOil } = useQuery<OilFGData>({
     queryKey: ["/api/oilfg"], refetchInterval: 5 * 60 * 1000, staleTime: 4 * 60 * 1000,
   });
+  const { data: nasdaqData, refetch: refetchNasdaq, isFetching: fetchingNasdaq } = useQuery<NasdaqFGData>({
+    queryKey: ["/api/nasdaqfg"], refetchInterval: 5 * 60 * 1000, staleTime: 4 * 60 * 1000,
+  });
 
-  const isFetching = fetchingStock || fetchingOil;
-  useEffect(() => { if (stockData || oilData) setLastUpdated(new Date()); }, [stockData, oilData]);
+  const isFetching = fetchingStock || fetchingOil || fetchingNasdaq;
+  useEffect(() => { if (stockData || oilData || nasdaqData) setLastUpdated(new Date()); }, [stockData, oilData, nasdaqData]);
 
-  const handleRefresh = () => { refetchStock(); refetchOil(); };
+  const handleRefresh = () => { refetchStock(); refetchOil(); refetchNasdaq(); };
 
   const TABS: { id: TabId; label: string; icon?: any; score?: number; color?: string }[] = [
     { id: "stocks", label: "S&P 500", score: stockData?.fear_and_greed?.score },
+    { id: "nasdaq", label: "NASDAQ", score: nasdaqData?.score, color: "#a855f7" },
     { id: "wti", label: "WTI Crude", score: oilData?.wti?.score, color: "#f59e0b" },
     { id: "brent", label: "Brent Crude", score: oilData?.brent?.score, color: "#3b82f6" },
   ];
@@ -636,7 +792,7 @@ export default function Dashboard() {
               </svg>
               <div>
                 <h1 className="text-sm font-bold tracking-wide">FEAR & GREED DASHBOARD</h1>
-                <p className="text-[10px] text-muted-foreground">Stocks · WTI · Brent · Live Data</p>
+                <p className="text-[10px] text-muted-foreground">Stocks · NASDAQ · WTI · Brent · Live Data</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -666,6 +822,7 @@ export default function Dashboard() {
                     active ? "border-b-2 bg-background text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"
                   }`}
                   style={{ borderBottomColor: active ? col : "transparent" }}>
+                  {t.id === "nasdaq" && <BarChart2 size={12} style={{ color: col }}/>}
                   {t.id === "wti" && <Flame size={12} style={{ color: col }}/>}
                   {t.id === "brent" && <Droplets size={12} style={{ color: col }}/>}
                   {t.label}
@@ -684,6 +841,7 @@ export default function Dashboard() {
       {/* Tab content */}
       <main className="max-w-7xl mx-auto px-4 py-5">
         {tab === "stocks" && <StockTab data={stockData}/>}
+        {tab === "nasdaq" && <NasdaqTab data={nasdaqData}/>}
         {tab === "wti" && <OilTab data={oilData} asset="wti" label="WTI" icon={Flame} accentColor="#f59e0b"/>}
         {tab === "brent" && <OilTab data={oilData} asset="brent" label="Brent" icon={Droplets} accentColor="#3b82f6"/>}
       </main>
@@ -692,6 +850,7 @@ export default function Dashboard() {
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
           <div className="text-xs text-muted-foreground">
             Stock data: <a href="https://www.cnn.com/markets/fear-and-greed" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">CNN Fear & Greed</a> ·
+            NASDAQ data: <a href="https://finance.yahoo.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">Yahoo Finance</a> (QQQ, ^NDX, ^VXN) ·
             Oil data: <a href="https://finance.yahoo.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">Yahoo Finance</a> (CL=F, BZ=F, ^OVX) ·
             Not financial advice.
           </div>

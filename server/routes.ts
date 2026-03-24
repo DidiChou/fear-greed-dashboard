@@ -208,6 +208,8 @@ let cache: {
   stockFG: any;
   wti: any;
   brent: any;
+  spread: number;
+  ovx: number | null;
   ovxCloses: number[];
   updatedAt: number;
 } | null = null;
@@ -245,7 +247,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       // Serve from cache if fresh
       if (cache && now - cache.updatedAt < CACHE_TTL) {
-        return res.json({ wti: cache.wti, brent: cache.brent, updatedAt: cache.updatedAt });
+        return res.json({ wti: cache.wti, brent: cache.brent, spread: cache.spread, ovx: cache.ovx, updatedAt: cache.updatedAt });
       }
 
       // Fetch OVX first (used as shared volatility component)
@@ -267,18 +269,189 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       // Add spread component to context
       const spread = brent.price - wti.price;
-
-      cache = { stockFG: null, wti, brent, ovxCloses, updatedAt: now };
+      const ovx = ovxCloses[ovxCloses.length - 1] ?? null;
+      cache = { stockFG: null, wti, brent, spread: Math.round(spread * 100) / 100, ovx, ovxCloses, updatedAt: now };
 
       res.json({
         wti,
         brent,
         spread: Math.round(spread * 100) / 100,
-        ovx: ovxCloses[ovxCloses.length - 1] ?? null,
+        ovx,
         updatedAt: now,
       });
     } catch (e: any) {
       console.error("Oil F&G error:", e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── NASDAQ Fear & Greed (computed from Yahoo Finance) ────────────────────────
+  let nasdaqCache: { data: any; updatedAt: number } | null = null;
+
+  app.get("/api/nasdaqfg", async (req, res) => {
+    try {
+      const now = Date.now();
+      if (nasdaqCache && now - nasdaqCache.updatedAt < CACHE_TTL) {
+        return res.json(nasdaqCache.data);
+      }
+
+      // Fetch QQQ (NASDAQ 100 ETF), VXN (NASDAQ volatility), and ^IXIC (NASDAQ Composite)
+      let vxnCloses: number[] = [];
+      try {
+        const vxnData = await fetchYahooQuote("^VXN");
+        vxnCloses = (vxnData.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? []).filter((v: any) => v != null);
+      } catch {
+        vxnCloses = [25];
+      }
+
+      const [qqqData, ndxData] = await Promise.all([
+        fetchYahooQuote("QQQ"),
+        fetchYahooQuote("^NDX"),
+      ]);
+
+      const qqqResult = qqqData.chart?.result?.[0];
+      const ndxResult = ndxData.chart?.result?.[0];
+      if (!qqqResult || !ndxResult) throw new Error("No NASDAQ data");
+
+      const closes: number[] = qqqResult.indicators.quote[0].close.filter((v: any) => v != null);
+      const ndxCloses: number[] = ndxResult.indicators.quote[0].close.filter((v: any) => v != null);
+      const timestamps: number[] = qqqResult.timestamp;
+
+      const high52w = Math.max(...closes);
+      const low52w = Math.min(...closes);
+      const price = closes[closes.length - 1];
+      const prevPrice = closes[closes.length - 2] ?? price;
+      const change = price - prevPrice;
+      const changePct = (change / prevPrice) * 100;
+
+      const ndxPrice = ndxCloses[ndxCloses.length - 1];
+      const ndxHigh = Math.max(...ndxCloses);
+      const ndxLow = Math.min(...ndxCloses);
+
+      // 6 NASDAQ-specific components
+      // 1. Price Momentum (QQQ vs SMA50)
+      const sma50 = calcSMA(closes, 50);
+      const momentumDev = ((price - sma50) / sma50) * 100;
+      const momentumScore = scale(momentumDev, -15, 15);
+
+      // 2. VXN Volatility (NASDAQ VIX — high = fear)
+      const vxnCurrent = vxnCloses.length > 0 ? vxnCloses[vxnCloses.length - 1] : 25;
+      const vxnScore = scale(vxnCurrent, 12, 60, true); // invert
+
+      // 3. Price Strength (QQQ within 52w range)
+      const strengthScore = scale(price, low52w, high52w);
+
+      // 4. 30-day ROC
+      const roc30 = calcROC(closes, 30);
+      const rocScore = scale(roc30, -25, 25);
+
+      // 5. Short-term Trend (SMA5 vs SMA20)
+      const sma5 = calcSMA(closes, 5);
+      const sma20 = calcSMA(closes, 20);
+      const shortMomDev = ((sma5 - sma20) / sma20) * 100;
+      const shortMomScore = scale(shortMomDev, -8, 8);
+
+      // 6. RSI(14)
+      const rsi = calcRSI(closes, 14);
+      const rsiScore = rsi;
+
+      const weights = [0.20, 0.20, 0.15, 0.20, 0.10, 0.15];
+      const scores = [momentumScore, vxnScore, strengthScore, rocScore, shortMomScore, rsiScore];
+      const composite = scores.reduce((acc, s, i) => acc + s * weights[i], 0);
+
+      const getRating = (s: number) => {
+        if (s <= 24) return "Extreme Fear";
+        if (s <= 44) return "Fear";
+        if (s <= 54) return "Neutral";
+        if (s <= 74) return "Greed";
+        return "Extreme Greed";
+      };
+
+      // 90-day historical
+      const historical: { date: string; price: number; score: number }[] = [];
+      const histLen = Math.min(90, closes.length - 50);
+      for (let i = histLen; i >= 0; i--) {
+        const slice = closes.slice(0, closes.length - i);
+        const hp = slice[slice.length - 1];
+        const hsma50 = calcSMA(slice, Math.min(50, slice.length));
+        const hDev = ((hp - hsma50) / hsma50) * 100;
+        const hStrength = scale(hp, low52w, high52w);
+        const hRsi = calcRSI(slice, 14);
+        const hRoc = calcROC(slice, Math.min(30, slice.length - 1));
+        const hVxnScore = scale(vxnCurrent, 12, 60, true);
+        const hScore = Math.round(
+          scale(hDev, -15, 15) * 0.25 +
+          hStrength * 0.20 +
+          scale(hRoc, -25, 25) * 0.25 +
+          hRsi * 0.15 +
+          hVxnScore * 0.15
+        );
+        const tsIdx = timestamps.length - (i === 0 ? 1 : i);
+        const ts = timestamps[Math.max(0, tsIdx)];
+        historical.push({
+          date: new Date(ts * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+          price: Math.round(hp * 100) / 100,
+          score: Math.max(0, Math.min(100, hScore)),
+        });
+      }
+
+      const result = {
+        score: Math.round(composite * 10) / 10,
+        rating: getRating(composite),
+        price: Math.round(price * 100) / 100,
+        change: Math.round(change * 100) / 100,
+        changePct: Math.round(changePct * 100) / 100,
+        high52w: Math.round(high52w * 100) / 100,
+        low52w: Math.round(low52w * 100) / 100,
+        ndxPrice: Math.round(ndxPrice * 100) / 100,
+        ndxHigh52w: Math.round(ndxHigh * 100) / 100,
+        ndxLow52w: Math.round(ndxLow * 100) / 100,
+        vxn: Math.round(vxnCurrent * 10) / 10,
+        components: [
+          {
+            label: "Price Momentum",
+            score: Math.round(momentumScore),
+            value: `${momentumDev >= 0 ? "+" : ""}${momentumDev.toFixed(1)}% vs SMA50`,
+            description: "QQQ deviation from 50-day moving average",
+          },
+          {
+            label: "VXN Volatility",
+            score: Math.round(vxnScore),
+            value: `VXN: ${vxnCurrent.toFixed(1)}`,
+            description: "NASDAQ Volatility Index (inverted)",
+          },
+          {
+            label: "Price Strength",
+            score: Math.round(strengthScore),
+            value: `$${price.toFixed(2)} / 52w: $${low52w.toFixed(0)}–$${high52w.toFixed(0)}`,
+            description: "QQQ position within 52-week price range",
+          },
+          {
+            label: "30D Rate of Change",
+            score: Math.round(rocScore),
+            value: `${roc30 >= 0 ? "+" : ""}${roc30.toFixed(1)}%`,
+            description: "30-day price momentum (rate of change)",
+          },
+          {
+            label: "Short-term Trend",
+            score: Math.round(shortMomScore),
+            value: `SMA5 ${shortMomDev >= 0 ? ">" : "<"} SMA20 by ${Math.abs(shortMomDev).toFixed(1)}%`,
+            description: "5-day vs 20-day SMA crossover signal",
+          },
+          {
+            label: "RSI (14)",
+            score: Math.round(rsiScore),
+            value: `RSI: ${rsi.toFixed(1)}`,
+            description: "Relative Strength Index — overbought/oversold",
+          },
+        ],
+        historical,
+      };
+
+      nasdaqCache = { data: result, updatedAt: now };
+      res.json(result);
+    } catch (e: any) {
+      console.error("NASDAQ F&G error:", e.message);
       res.status(500).json({ error: e.message });
     }
   });
