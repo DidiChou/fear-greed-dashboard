@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis,
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
-  LineChart, Line, CartesianGrid, ReferenceLine, ComposedChart, Area,
+  LineChart, Line, CartesianGrid, ReferenceLine, ComposedChart, Area, Customized,
 } from "recharts";
 import { PerplexityAttribution } from "@/components/PerplexityAttribution";
 import { RefreshCw, Sun, Moon, TrendingUp, TrendingDown, Minus, Flame, Droplets } from "lucide-react";
@@ -106,13 +106,155 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return <div className="text-[10px] font-bold tracking-widest text-muted-foreground uppercase mb-3">{children}</div>;
 }
 
+// ─── KPI Tooltip Definitions ──────────────────────────────────────────────────
+const KPI_TOOLTIPS: Record<string, string> = {
+  "CNN F&G": "CNN's composite Fear & Greed Index for US stocks. Aggregates 7 indicators including momentum, volatility, safe haven demand, and market breadth.",
+  "VIX": "CBOE Volatility Index — the 'fear gauge' of Wall Street. Measures expected 30-day S&P 500 volatility. Above 30 signals high fear; below 15 signals complacency.",
+  "Put/Call": "Ratio of put options vs. call options traded. Above 1.0 signals bearish sentiment (more puts bought); below 0.7 indicates excessive bullishness.",
+  "AAII Bull": "% of individual investors who are bullish in AAII's weekly sentiment survey. Long-term average is ~38%. Extremes often signal contrarian opportunities.",
+  "AAII Bear": "% of individual investors who are bearish in AAII's weekly survey. Long-term average is ~31%. Rising bearish % at extremes can be a contrarian buy signal.",
+  "HY Spread": "High Yield (junk bond) credit spread over Treasuries. Widening spreads = rising default fear. Tightening = risk appetite recovering.",
+  "% > 200D MA": "Percentage of S&P 500 stocks trading above their 200-day moving average. Above 70% = broad strength; below 30% = broad weakness / capitulation.",
+  "10Y Yield": "US 10-Year Treasury yield. Rising yields pressure equity valuations (higher discount rate). Reflects inflation and Fed policy expectations.",
+  "Fed Rate": "Current Federal Funds Rate target range. Higher rates increase borrowing costs and reduce the relative attractiveness of equities vs. bonds.",
+  // Oil components
+  "Price Momentum": "Compares current price to its 50-day simple moving average. Strong positive momentum (price >> SMA50) scores high; negative momentum scores low.",
+  "OVX Volatility": "CBOE Oil Volatility Index — the VIX equivalent for crude oil. High OVX (>50) indicates fear and uncertainty in oil markets; low OVX = complacency.",
+  "Price Strength": "Measures where current price sits within its 52-week high/low range. Near 52W high = strength (Greed); near 52W low = weakness (Fear).",
+  "30D Rate of Change": "Price change over the last 30 trading days as a percentage. Strong positive ROC = bullish momentum; sharp negative ROC = bearish momentum.",
+  "Short-term Trend": "Compares the 5-day SMA to the 20-day SMA. When SMA5 > SMA20, short-term trend is bullish. When SMA5 < SMA20, trend has turned bearish.",
+  "RSI": "Relative Strength Index (14-day). Above 70 = overbought / Extreme Greed. Below 30 = oversold / Extreme Fear. 50 is the neutral midpoint.",
+  "Brent–WTI Spread": "Price difference between Brent Crude and WTI. Brent typically trades at a premium to WTI due to lower sulfur content and global benchmark status. Widening spread signals Brent-specific demand.",
+  "OVX (Oil VIX)": "CBOE Crude Oil Volatility Index. Derived from USO options. Elevated OVX (>50) signals fear and expectation of large price swings in crude oil markets.",
+  "Updated": "Timestamp of the last successful data refresh. The backend caches oil data for 5 minutes to avoid overloading Yahoo Finance — auto-refreshes every 5 minutes.",
+};
+
 function KpiCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
+  const [showTip, setShowTip] = useState(false);
+  const tipText = KPI_TOOLTIPS[label];
   return (
-    <div className="bg-card border border-border rounded-lg p-3 flex flex-col gap-1">
+    <div
+      className="bg-card border border-border rounded-lg p-3 flex flex-col gap-1 relative cursor-default"
+      onMouseEnter={() => tipText && setShowTip(true)}
+      onMouseLeave={() => setShowTip(false)}
+      data-testid={`kpi-${label.toLowerCase().replace(/[^a-z0-9]/g, '-')}`}
+    >
       <span className="text-[10px] font-bold tracking-widest text-muted-foreground uppercase">{label}</span>
       <span className="text-xl font-black tabular-nums" style={{ color: color || "hsl(var(--foreground))" }}>{value}</span>
       {sub && <span className="text-xs text-muted-foreground">{sub}</span>}
+      {showTip && tipText && (
+        <div className="absolute z-50 bottom-full left-0 mb-2 w-64 rounded-lg px-3 py-2.5 text-xs leading-relaxed shadow-xl pointer-events-none"
+          style={{ backgroundColor: "#1e293b", color: "#ffffff", border: "1px solid rgba(255,255,255,0.12)" }}>
+          {tipText}
+          <div className="absolute top-full left-4 w-0 h-0" style={{ borderLeft: "5px solid transparent", borderRight: "5px solid transparent", borderTop: "5px solid #1e293b" }}/>
+        </div>
+      )}
     </div>
+  );
+}
+
+// ─── Colored historical line ───────────────────────────────────────────────
+// Pure SVG approach: Recharts <Customized> receives xAxisMap/yAxisMap with scale functions.
+// Renders a colored polyline as a Recharts <Customized> child — receives full chart state
+function makeColoredCustomized(scoreData: { score: number }[], yAxisId?: string) {
+  const C = (props: any) => {
+    // Recharts passes xAxisMap, yAxisMap, offset to Customized children
+    const { xAxisMap, yAxisMap, offset } = props;
+    if (!xAxisMap || !yAxisMap) return null;
+
+    // Get the first x axis and the correct y axis
+    const xAxis = xAxisMap[Object.keys(xAxisMap)[0]];
+    const yAxisKey = yAxisId ? Object.keys(yAxisMap).find(
+      k => yAxisMap[k].yAxisId === yAxisId || k === yAxisId
+    ) ?? Object.keys(yAxisMap)[0] : Object.keys(yAxisMap)[0];
+    const yAxis = yAxisMap[yAxisKey];
+
+    if (!xAxis || !yAxis) return null;
+
+    const xScale = xAxis.scale;
+    const yScale = yAxis.scale;
+    if (!xScale || !yScale) return null;
+
+    // Map data points to pixel coords
+    const pts = scoreData.map((d, i) => ({
+      x: xScale(i),
+      y: yScale(d.score),
+      score: d.score,
+    })).filter(p => !isNaN(p.x) && !isNaN(p.y));
+
+    if (pts.length < 2) return null;
+
+    return (
+      <g clipPath={`url(#recharts${xAxis.xAxisId ?? ''}-clip)`}>
+        {pts.slice(0, -1).map((p1, i) => {
+          const p2 = pts[i + 1];
+          const mid = (p1.score + p2.score) / 2;
+          return <line key={i} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
+            stroke={getZoneColor(mid)} strokeWidth={2.5} strokeLinecap="round"/>;
+        })}
+        {/* Active dot handled by invisible Line below */}
+      </g>
+    );
+  };
+  C.displayName = "ColoredSegments";
+  return C;
+}
+
+function ColoredHistoricalLine({ data }: { data: { date: string; score: number }[] }) {
+  const ColoredSegments = makeColoredCustomized(data);
+  const ActiveDot = (props: any) => {
+    const { cx, cy, payload } = props;
+    if (!payload || isNaN(cx) || isNaN(cy)) return null;
+    return <circle cx={cx} cy={cy} r={5} fill={getZoneColor(payload.score)} stroke="#fff" strokeWidth={1.5}/>;
+  };
+
+  return (
+    <ResponsiveContainer width="100%" height={144}>
+      <LineChart data={data} margin={{ top:4, right:8, left:-20, bottom:0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false}/>
+        <XAxis dataKey="date" tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false} interval={14}/>
+        <YAxis domain={[0,100]} tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false}/>
+        <Tooltip contentStyle={{ backgroundColor:"hsl(var(--card))", border:"1px solid hsl(var(--border))", borderRadius:"8px", fontSize:"12px" }}
+          formatter={(v:number)=>[`${v} — ${getZoneLabel(v)}`,"Score"]}/>
+        {[25,45,55,75].map(l=><ReferenceLine key={l} y={l} stroke="hsl(var(--border))" strokeDasharray="4 4"/>)}
+        {/* Invisible line for tooltip + active dot hit area */}
+        <Line type="linear" dataKey="score" stroke="transparent" strokeWidth={8}
+          dot={false} activeDot={<ActiveDot/>}/>
+        {/* @ts-ignore */}
+        <Customized component={ColoredSegments} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+function OilColoredHistoricalChart({ data, accentColor }: { data: { date: string; price: number; score: number }[]; accentColor: string }) {
+  const ColoredSegments = makeColoredCustomized(data, "score");
+  const ActiveDot = (props: any) => {
+    const { cx, cy, payload } = props;
+    if (!payload || isNaN(cx) || isNaN(cy)) return null;
+    return <circle cx={cx} cy={cy} r={5} fill={getZoneColor(payload.score)} stroke="#fff" strokeWidth={1.5}/>;
+  };
+
+  return (
+    <ResponsiveContainer width="100%" height={180}>
+      <ComposedChart data={data} margin={{ top:4, right:40, left:-20, bottom:0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false}/>
+        <XAxis dataKey="date" tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false} interval={14}/>
+        <YAxis yAxisId="price" orientation="right" tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false}
+          domain={["auto","auto"]} tickFormatter={(v:number)=>`$${v}`}/>
+        <YAxis yAxisId="score" domain={[0,100]} tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false}/>
+        <Tooltip contentStyle={{ backgroundColor:"hsl(var(--card))", border:"1px solid hsl(var(--border))", borderRadius:"8px", fontSize:"12px" }}
+          formatter={(v:any, name:string)=>[name==="score" ? `${v} — ${getZoneLabel(v)}` : `$${v}`, name==="score"?"F&G Score":"Price"]}/>
+        {[25,45,55,75].map(l=><ReferenceLine key={l} yAxisId="score" y={l} stroke="hsl(var(--border))" strokeDasharray="4 4"/>)}
+        {/* Invisible score line for tooltip hit area */}
+        <Line yAxisId="score" type="linear" dataKey="score" stroke="transparent" strokeWidth={8}
+          dot={false} activeDot={<ActiveDot/>}/>
+        {/* Price line */}
+        <Line yAxisId="price" type="monotone" dataKey="price" stroke={accentColor} strokeWidth={2} dot={false} strokeDasharray="4 2"/>
+        {/* @ts-ignore */}
+        <Customized component={ColoredSegments} />
+      </ComposedChart>
+    </ResponsiveContainer>
   );
 }
 
@@ -224,17 +366,7 @@ function StockTab({ data }: { data: StockFGData | undefined }) {
       {historical.length > 0 && (
         <Card className="p-4">
           <SectionLabel>Historical — 90 Days</SectionLabel>
-          <ResponsiveContainer width="100%" height={120}>
-            <LineChart data={historical} margin={{ top:4, right:8, left:-20, bottom:0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false}/>
-              <XAxis dataKey="date" tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false} interval={14}/>
-              <YAxis domain={[0,100]} tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false}/>
-              <Tooltip contentStyle={{ backgroundColor:"hsl(var(--card))", border:"1px solid hsl(var(--border))", borderRadius:"8px", fontSize:"12px" }}
-                formatter={(v:number)=>[`${v} — ${getZoneLabel(v)}`,"Score"]}/>
-              {[25,45,55,75].map(l=><ReferenceLine key={l} y={l} stroke="hsl(var(--border))" strokeDasharray="4 4"/>)}
-              <Line type="monotone" dataKey="score" stroke={scoreColor} strokeWidth={2} dot={false} activeDot={{ r:4 }}/>
-            </LineChart>
-          </ResponsiveContainer>
+          <ColoredHistoricalLine data={historical} />
         </Card>
       )}
 
@@ -363,23 +495,10 @@ function OilTab({ data, asset, label, icon: Icon, accentColor }:
       {oil.historical.length > 0 && (
         <Card className="p-4">
           <SectionLabel>Price & Sentiment — 90 Days</SectionLabel>
-          <ResponsiveContainer width="100%" height={150}>
-            <ComposedChart data={oil.historical} margin={{ top:4, right:40, left:-20, bottom:0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false}/>
-              <XAxis dataKey="date" tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false} interval={14}/>
-              <YAxis yAxisId="price" orientation="right" tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false}
-                domain={["auto","auto"]} tickFormatter={v=>`$${v}`}/>
-              <YAxis yAxisId="score" domain={[0,100]} tick={{ fill:"hsl(var(--muted-foreground))", fontSize:10 }} tickLine={false}/>
-              <Tooltip contentStyle={{ backgroundColor:"hsl(var(--card))", border:"1px solid hsl(var(--border))", borderRadius:"8px", fontSize:"12px" }}
-                formatter={(v:any, name:string)=>[name==="score" ? `${v} — ${getZoneLabel(v)}` : `$${v}`, name==="score"?"F&G Score":"Price"]}/>
-              {[25,45,55,75].map(l=><ReferenceLine key={l} yAxisId="score" y={l} stroke="hsl(var(--border))" strokeDasharray="4 4"/>)}
-              <Area yAxisId="score" type="monotone" dataKey="score" stroke={scoreColor} fill={scoreColor} fillOpacity={0.12} strokeWidth={2} dot={false}/>
-              <Line yAxisId="price" type="monotone" dataKey="price" stroke={accentColor} strokeWidth={2} dot={false} strokeDasharray="4 2"/>
-            </ComposedChart>
-          </ResponsiveContainer>
+          <OilColoredHistoricalChart data={oil.historical} accentColor={accentColor} />
           <div className="flex gap-4 mt-2 text-xs text-muted-foreground">
-            <div className="flex items-center gap-1"><div className="w-3 h-0.5 rounded" style={{ backgroundColor: scoreColor }}/> Fear & Greed Score (left axis)</div>
-            <div className="flex items-center gap-1"><div className="w-3 h-0.5 rounded border-dashed" style={{ backgroundColor: accentColor }}/> Price USD (right axis)</div>
+            <div className="flex items-center gap-1"><div className="w-4 h-1 rounded" style={{ background: "linear-gradient(to right, #ef4444, #f97316, #eab308, #84cc16, #22c55e)" }}/> F&G Score (left axis)</div>
+            <div className="flex items-center gap-1"><div className="w-3 h-0.5 rounded" style={{ backgroundColor: accentColor, borderTop: "2px dashed" }}/> Price USD (right axis)</div>
           </div>
         </Card>
       )}
